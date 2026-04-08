@@ -2,17 +2,7 @@
 /**
  ******************************************************************************
  * @file           : main.c
- * @brief          : Main program body
- ******************************************************************************
- * @attention
- *
- * Copyright (c) 2026 STMicroelectronics.
- * All rights reserved.
- *
- * This software is licensed under terms that can be found in the LICENSE file
- * in the root directory of this software component.
- * If no LICENSE file comes with this software, it is provided AS-IS.
- *
+ * @brief          : Main program body (Projeto MCC)
  ******************************************************************************
  */
 /* USER CODE END Header */
@@ -21,10 +11,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
-// We use this so we can handle sprintf
 #include <stdio.h>
-
+#include <string.h>
+#include <stdlib.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -45,13 +34,38 @@
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc1;
 
+TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
+TIM_HandleTypeDef htim4;
 
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
+// Variáveis para envio de dados
+uint32_t tempo_ms = 0;
 
+// ADC e Corrente (Leitura desativada, mas variáveis mantidas pro Qt não bugar)
+uint32_t adc_value = 0;
+float adc_voltage = 0.0f;
+float corrente_A = 0.0f;
+float corrente_filtrada = 0.0f;
+
+// Encoder e Velocidade
+int16_t count_encoder = 0;
+float velocidade_rpm = 0.0f;
+
+// Variáveis para recepção UART
+uint8_t rx_data;
+char rx_buffer[20];
+uint8_t rx_index = 0;
+
+// *** VARIÁVEIS DA RAMPA DE ACELERAÇÃO (A VACINA) ***
+int pwm_target = 0; // O valor que o Qt pediu
+int pwm_atual = 0;  // O valor físico atual do PWM
+
+// Bandeira para desafogar a interrupção
+volatile uint8_t flag_enviar_dados = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -61,8 +75,9 @@ static void MX_USART2_UART_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_TIM3_Init(void);
+static void MX_TIM1_Init(void);
+static void MX_TIM4_Init(void);
 /* USER CODE BEGIN PFP */
-
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -102,45 +117,49 @@ int main(void) {
 	MX_ADC1_Init();
 	MX_TIM2_Init();
 	MX_TIM3_Init();
+	MX_TIM1_Init();
+	MX_TIM4_Init();
 	/* USER CODE BEGIN 2 */
 
-	// Start timers in interrupt mode (IT)
-	// We put this here because the timers must be initialized first,
-	// but they need a manual start to begin counting before the loop.
-	HAL_TIM_Base_Start_IT(&htim2); // Start 1s timer
-	HAL_TIM_Base_Start_IT(&htim3); // Start 10ms timer
+	// 1. Inicia a recepção UART por interrupção (1 byte por vez)
+	HAL_UART_Receive_IT(&huart2, &rx_data, 1);
+
+	// 2. Inicia os Timers de tempo
+	HAL_TIM_Base_Start_IT(&htim2); // 1s
+	HAL_TIM_Base_Start_IT(&htim4); // AGORA O TIM4 É O LOOP DE 10ms!
+
+	// 3. Inicia o Encoder (AGORA NO TIM3)
+	HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL);
+	__HAL_TIM_SET_COUNTER(&htim3, 0); // Zera o contador inicial
+
+	// 4. Inicia o PWM no Hacheur (TIM1)
+	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
+	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0); // Inicia parado
 
 	/* USER CODE END 2 */
 
 	/* Infinite loop */
 	/* USER CODE BEGIN WHILE */
 	while (1) {
+		// --- O TRABALHO PESADO FICA AQUI FORA DA INTERRUPÇÃO ---
+		if (flag_enviar_dados == 1) {
+			flag_enviar_dados = 0; // Abaixa a bandeira
+
+			static char msg_buffer[60];
+
+			// Transforma corrente em mA (Vai enviar 0 por enquanto)
+			int corrente_mA = (int) (corrente_filtrada * 1000.0f);
+
+			// Formato: tempo,rpm,corrente_mA
+			int len = sprintf(msg_buffer, "%lu,%d,%d\n", tempo_ms,
+					(int) velocidade_rpm, corrente_mA);
+
+			HAL_UART_Transmit(&huart2, (uint8_t*) msg_buffer, len, 10);
+		}
+
 		/* USER CODE END WHILE */
 
 		/* USER CODE BEGIN 3 */
-
-		// Trigger ADC conversion for the potentiometer on A0_ADC
-		HAL_ADC_Start(&hadc1);
-
-		// Wait for conversion to complete (polling)
-		if (HAL_ADC_PollForConversion(&hadc1, 10) == HAL_OK) {
-
-			// Retrieve the 12-bit digital value (0-4095)
-			uint32_t adc_value = HAL_ADC_GetValue(&hadc1);
-
-			// Format the data into a string for serial transmission
-			char msg_buffer[50];
-
-			// Store the exact length of the string
-			int len = sprintf(msg_buffer, "ADC Raw Value: %lu\r\n", adc_value);
-
-			// Use HAL_MAX_DELAY to prevent the 10ms interrupt from breaking the message
-			HAL_UART_Transmit(&huart2, (uint8_t*) msg_buffer, len, HAL_MAX_DELAY);
-		}
-
-		// Loop delay to maintain a readable refresh rate on the terminal
-		HAL_Delay(500);
-
 	}
 	/* USER CODE END 3 */
 }
@@ -238,6 +257,77 @@ static void MX_ADC1_Init(void) {
 }
 
 /**
+ * @brief TIM1 Initialization Function
+ * @param None
+ * @retval None
+ */
+static void MX_TIM1_Init(void) {
+
+	/* USER CODE BEGIN TIM1_Init 0 */
+
+	/* USER CODE END TIM1_Init 0 */
+
+	TIM_ClockConfigTypeDef sClockSourceConfig = { 0 };
+	TIM_MasterConfigTypeDef sMasterConfig = { 0 };
+	TIM_OC_InitTypeDef sConfigOC = { 0 };
+	TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = { 0 };
+
+	/* USER CODE BEGIN TIM1_Init 1 */
+
+	/* USER CODE END TIM1_Init 1 */
+	htim1.Instance = TIM1;
+	htim1.Init.Prescaler = 41;
+	htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
+	htim1.Init.Period = 99;
+	htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+	htim1.Init.RepetitionCounter = 0;
+	htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+	if (HAL_TIM_Base_Init(&htim1) != HAL_OK) {
+		Error_Handler();
+	}
+	sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+	if (HAL_TIM_ConfigClockSource(&htim1, &sClockSourceConfig) != HAL_OK) {
+		Error_Handler();
+	}
+	if (HAL_TIM_PWM_Init(&htim1) != HAL_OK) {
+		Error_Handler();
+	}
+	sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+	sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+	if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig)
+			!= HAL_OK) {
+		Error_Handler();
+	}
+	sConfigOC.OCMode = TIM_OCMODE_PWM1;
+	sConfigOC.Pulse = 0;
+	sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+	sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
+	sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+	sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
+	sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
+	if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_1)
+			!= HAL_OK) {
+		Error_Handler();
+	}
+	sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
+	sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
+	sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
+	sBreakDeadTimeConfig.DeadTime = 0;
+	sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
+	sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
+	sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
+	if (HAL_TIMEx_ConfigBreakDeadTime(&htim1, &sBreakDeadTimeConfig)
+			!= HAL_OK) {
+		Error_Handler();
+	}
+	/* USER CODE BEGIN TIM1_Init 2 */
+
+	/* USER CODE END TIM1_Init 2 */
+	HAL_TIM_MspPostInit(&htim1);
+
+}
+
+/**
  * @brief TIM2 Initialization Function
  * @param None
  * @retval None
@@ -290,23 +380,29 @@ static void MX_TIM3_Init(void) {
 
 	/* USER CODE END TIM3_Init 0 */
 
-	TIM_ClockConfigTypeDef sClockSourceConfig = { 0 };
+
+	TIM_Encoder_InitTypeDef sConfig = { 0 };
 	TIM_MasterConfigTypeDef sMasterConfig = { 0 };
 
 	/* USER CODE BEGIN TIM3_Init 1 */
 
 	/* USER CODE END TIM3_Init 1 */
 	htim3.Instance = TIM3;
-	htim3.Init.Prescaler = 8399;
+	htim3.Init.Prescaler = 0;
 	htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
-	htim3.Init.Period = 99;
+	htim3.Init.Period = 65535;
 	htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
 	htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-	if (HAL_TIM_Base_Init(&htim3) != HAL_OK) {
-		Error_Handler();
-	}
-	sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-	if (HAL_TIM_ConfigClockSource(&htim3, &sClockSourceConfig) != HAL_OK) {
+	sConfig.EncoderMode = TIM_ENCODERMODE_TI1;
+	sConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
+	sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
+	sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
+	sConfig.IC1Filter = 0;
+	sConfig.IC2Polarity = TIM_ICPOLARITY_RISING;
+	sConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
+	sConfig.IC2Prescaler = TIM_ICPSC_DIV1;
+	sConfig.IC2Filter = 0;
+	if (HAL_TIM_Encoder_Init(&htim3, &sConfig) != HAL_OK) {
 		Error_Handler();
 	}
 	sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
@@ -318,6 +414,48 @@ static void MX_TIM3_Init(void) {
 	/* USER CODE BEGIN TIM3_Init 2 */
 
 	/* USER CODE END TIM3_Init 2 */
+
+}
+
+/**
+ * @brief TIM4 Initialization Function
+ * @param None
+ * @retval None
+ */
+static void MX_TIM4_Init(void) {
+
+	/* USER CODE BEGIN TIM4_Init 0 */
+
+	/* USER CODE END TIM4_Init 0 */
+
+	TIM_ClockConfigTypeDef sClockSourceConfig = { 0 };
+	TIM_MasterConfigTypeDef sMasterConfig = { 0 };
+
+	/* USER CODE BEGIN TIM4_Init 1 */
+
+	/* USER CODE END TIM4_Init 1 */
+	htim4.Instance = TIM4;
+	htim4.Init.Prescaler = 83;
+	htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
+	htim4.Init.Period = 9999;
+	htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+	htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+	if (HAL_TIM_Base_Init(&htim4) != HAL_OK) {
+		Error_Handler();
+	}
+	sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+	if (HAL_TIM_ConfigClockSource(&htim4, &sClockSourceConfig) != HAL_OK) {
+		Error_Handler();
+	}
+	sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+	sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+	if (HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig)
+			!= HAL_OK) {
+		Error_Handler();
+	}
+	/* USER CODE BEGIN TIM4_Init 2 */
+
+	/* USER CODE END TIM4_Init 2 */
 
 }
 
@@ -370,7 +508,10 @@ static void MX_GPIO_Init(void) {
 	__HAL_RCC_GPIOB_CLK_ENABLE();
 
 	/*Configure GPIO pin Output Level */
-	HAL_GPIO_WritePin(GPIOA, LD2_Pin | D7_OUT_Pin | D8_OUT_Pin, GPIO_PIN_RESET);
+	HAL_GPIO_WritePin(GPIOA, LD2_Pin | D8_OUT_Pin, GPIO_PIN_RESET);
+
+	/*Configure GPIO pin Output Level */
+	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, GPIO_PIN_RESET);
 
 	/*Configure GPIO pin : B1_Pin */
 	GPIO_InitStruct.Pin = B1_Pin;
@@ -378,12 +519,19 @@ static void MX_GPIO_Init(void) {
 	GPIO_InitStruct.Pull = GPIO_NOPULL;
 	HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
 
-	/*Configure GPIO pins : LD2_Pin D7_OUT_Pin D8_OUT_Pin */
-	GPIO_InitStruct.Pin = LD2_Pin | D7_OUT_Pin | D8_OUT_Pin;
+	/*Configure GPIO pins : LD2_Pin D8_OUT_Pin */
+	GPIO_InitStruct.Pin = LD2_Pin | D8_OUT_Pin;
 	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
 	GPIO_InitStruct.Pull = GPIO_NOPULL;
 	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
 	HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+	/*Configure GPIO pin : PB4 */
+	GPIO_InitStruct.Pin = GPIO_PIN_4;
+	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+	HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
 	/* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -392,20 +540,103 @@ static void MX_GPIO_Init(void) {
 
 /* USER CODE BEGIN 4 */
 
-// TIMER INTERRUPT CALLBACK
-// This function is automatically called by the HAL whenever a counter (CNT) hits the limit (ARR).
-// TIM2->ARR: 9999
-// TIM3->ARR: 99
+// ----------------------------------------------------------------------------
+// 1. INTERRUPÇÃO DOS TIMERS (Executa a cada 10ms)
+// ----------------------------------------------------------------------------
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 
-	// Toggle D8_OUT pin every 1 second (controlled by TIM2)
 	if (htim->Instance == TIM2) {
-		HAL_GPIO_TogglePin(D8_OUT_GPIO_Port, D8_OUT_Pin);
+		// Toggle do LED verde da Nucleo a cada 1 segundo
+		HAL_GPIO_TogglePin(GPIOA, LD2_Pin);
 	}
 
-	// Toggle D7_OUT pin every 10 milliseconds (controlled by TIM3)
-	else if (htim->Instance == TIM3) {
-		HAL_GPIO_TogglePin(D7_OUT_GPIO_Port, D7_OUT_Pin);
+	// AGORA O LOOP RÁPIDO É O TIM4
+	else if (htim->Instance == TIM4) {
+		// Incrementa o tempo
+		tempo_ms += 10;
+
+		// --- A. LER VELOCIDADE DO ENCODER (AGORA NO TIM3) ---
+		count_encoder = (int16_t) __HAL_TIM_GET_COUNTER(&htim3);
+		__HAL_TIM_SET_COUNTER(&htim3, 0);
+
+		// RPM = (pulsos / 2000) * (60 / 0.01) que simplifica para pulsos * 3
+		velocidade_rpm = (float) count_encoder * 3.0f;
+
+		// --- B. A MÁGICA: RAMPA DE DESACELERAÇÃO (1% a cada 10ms) ---
+		if (pwm_atual < pwm_target) {
+			pwm_atual++;
+		} else if (pwm_atual > pwm_target) {
+			pwm_atual--;
+		}
+		__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, pwm_atual);
+
+		// --- C. LER CORRENTE DO ADC (DESATIVADO POR ENQUANTO) ---
+		/*
+		HAL_ADC_Start(&hadc1);
+		if (HAL_ADC_PollForConversion(&hadc1, 1) == HAL_OK) {
+			adc_value = HAL_ADC_GetValue(&hadc1);
+			adc_voltage = (adc_value * 3.3f) / 4095.0f;
+
+			float corrente_bruta = adc_voltage / (0.05f * 10.0f);
+			corrente_filtrada = (0.1f * corrente_bruta) + (0.9f * corrente_filtrada);
+			corrente_A = corrente_filtrada;
+		}
+		*/
+
+		// C. LEVANTA A BANDEIRA DE ENVIO
+		flag_enviar_dados = 1;
+	}
+}
+// ----------------------------------------------------------------------------
+// 2. INTERRUPÇÃO DE RECEPÇÃO UART (Comandos vindos do Qt)
+// ----------------------------------------------------------------------------
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
+	if (huart->Instance == USART2) {
+
+		if (rx_data == '\n' || rx_data == '\r') {
+			rx_buffer[rx_index] = '\0';
+
+			// 1. Procura o 'P' na string para o PWM
+			char *p_ptr = strchr((char*) rx_buffer, 'P');
+			if (p_ptr) {
+				// Atualiza apenas o ALVO. A rampa cuida do resto!
+				pwm_target = atoi(p_ptr + 1);
+
+					if (pwm_target < 0)
+						pwm_target = 0;
+					if (pwm_target > 99)
+						pwm_target = 99;
+			}
+
+			// 2. Procura o 'S' na string para o Sentido
+			char *s_ptr = strchr((char*) rx_buffer, 'S');
+			if (s_ptr) {
+				int sentido = atoi(s_ptr + 1);
+				if (sentido == 1) {
+					// PINO PA9 (D8)
+					HAL_GPIO_WritePin(GPIOA, GPIO_PIN_9, GPIO_PIN_SET);
+				} else {
+					HAL_GPIO_WritePin(GPIOA, GPIO_PIN_9, GPIO_PIN_RESET);
+				}
+			}
+
+			rx_index = 0;
+		} else {
+			if (rx_index < 19) {
+				rx_buffer[rx_index++] = rx_data;
+			}
+		}
+
+		// REATIVA A INTERRUPÇÃO
+		HAL_UART_Receive_IT(&huart2, &rx_data, 1);
+	}
+}
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
+	if (huart->Instance == USART2) {
+		// Limpa a bandeira de erro (Overrun)
+		__HAL_UART_CLEAR_OREFLAG(huart);
+		// Força a placa a voltar a escutar o Qt
+		HAL_UART_Receive_IT(&huart2, &rx_data, 1);
 	}
 }
 

@@ -1,0 +1,18 @@
+!SESSION 2026-03-18 10:39:01.395 -----------------------------------------------
+eclipse.buildId=unknown
+java.version=17.0.9
+java.vendor=Eclipse Adoptium
+BootLoader constants: OS=linux, ARCH=x86_64, WS=gtk, NL=pt_BR
+Command-line arguments:  -data /home/lucassouza/Documentos/Proj_IPS/ips_mcc_stm32 -os linux -ws gtk -arch x86_64
+
+!ENTRY com.nxp.mcuxpresso.core.datamodels 1 0 2026-03-18 10:39:11.532
+!MESSAGE Recreating part support. No part support available.
+
+!ENTRY com.nxp.mcuxpresso.core.datamodels 1 0 2026-03-18 10:39:15.844
+!MESSAGE The device 'LPC55S69' (version='1.0.0') from SDK 'SDK_2.x_LPCXpresso55S69' (version='25.09.00', build='epluginsite815 2025-09-22') will be installed.
+
+!ENTRY org.eclipse.core.jobs 4 2 2026-03-18 10:40:05.992
+!MESSAGE An internal error occurred during: "Refresh SDK Repository...".
+!STACK 0
+java.lang.NullPointerException: Job of type com.nxp.mcuxpresso.core.datamodels.ui.jobs.RefreshSDKRepoJob returned no status.
+	at org.eclipse.core.internal.jobs.Worker.run(Worker.java:81)
