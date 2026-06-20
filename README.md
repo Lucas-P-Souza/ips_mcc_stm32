@@ -53,5 +53,5 @@ This repository contains the firmware (C) developed for the real-time control, s
 | **PA0 (A0)** | ADC1_IN0 | Current Sensor (Analog) |
 
 ---
-*Développé dans le cadre du module d'Asservissement / Systèmes Commandés.*
+*Développé dans le cadre du module d'Interface Puissance Système.*
 **Professeur:** M. Bourgeot
